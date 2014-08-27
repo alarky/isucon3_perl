@@ -298,14 +298,14 @@ get '/memo/:id' => [qw(session get_user)] => sub {
 
     my $cond;
     if ($user && $user->{id} == $memo->{user}) {
-        $cond = "";
+        $cond = "ORDER BY id";
     }
     else {
-        $cond = "AND seq_public>0";
+        $cond = "AND seq_public>0 ORDER BY seq_public";
     }
 
     my $memos = $self->dbh->select_all(
-        "SELECT * FROM memos WHERE user=? $cond ORDER BY seq_public",
+        "SELECT id FROM memos WHERE user=? $cond",
         $memo->{user},
     );
     my ($newer, $older);
