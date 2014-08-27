@@ -28,6 +28,20 @@ sub public_updated_time {
     $cache->set($key => "$sec.$microsec");
 }
 
+sub seq_public {
+    my ($self, $update) = @_;
+    my $key = "seq_public";
+    unless ($update) {
+        my $seq_public = $cache->get($key);
+        return $seq_public if $seq_public;
+    }
+    my $seq_public = $self->dbh->select_one(
+        'SELECT id FROM seq_public'
+    );
+    $cache->set($key => $seq_public);
+    return $seq_public;
+}
+
 
 # proc cache
 my %USER_OF;
@@ -140,9 +154,7 @@ filter 'anti_csrf' => sub {
 get '/' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
-    my $total = $self->dbh->select_one(
-        'SELECT id FROM seq_public'
-    );
+    my $total = $self->seq_public();
     my $memos = $self->dbh->select_all(
         sprintf("SELECT id, title, user, username, created_at FROM memos WHERE seq_public > 0 ORDER BY seq_public DESC LIMIT 100")
     );
@@ -156,9 +168,7 @@ get '/' => [qw(session get_user)] => sub {
 get '/recent/:page' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     my $page  = int $c->args->{page};
-    my $total = $self->dbh->select_one(
-        'SELECT id FROM seq_public'
-    );
+    my $total = $self->seq_public();
     my $memos = $self->get_public_memos_by_page($page);
     if ( @$memos == 0 ) {
         return $c->halt(404);
@@ -248,6 +258,7 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
     } else {
         $self->dbh->query("UPDATE seq_public SET id=LAST_INSERT_ID(id+1)");
         $seq_public = $self->dbh->last_insert_id;
+        $self->seq_public(my $update = 1);
     }
 
     my $content = scalar $c->req->param('content');
