@@ -20,14 +20,6 @@ my $cache = Cache::Memcached::Fast->new({
     servers => [ {address => '127.0.0.1:11212'}],
 });
 
-sub public_updated_time {
-    my ($self, $update) = @_;
-    my $key = "public_updated_time";
-    return $cache->get($key) unless $update;
-    my ($sec, $microsec) = gettimeofday;
-    $cache->set($key => "$sec.$microsec");
-}
-
 sub seq_public {
     my ($self, $update) = @_;
     my $key = "seq_public";
@@ -40,35 +32,6 @@ sub seq_public {
     );
     $cache->set($key => $seq_public);
     return $seq_public;
-}
-
-
-# proc cache
-my %USER_OF;
-
-my $LAST_PUBLIC_MEMOS_CACHED;
-my %PUBLIC_MEMOS_OF; # page => [ memo, memo,,, ]
-sub get_public_memos_by_page {
-    my ($self, $page) = @_;
-
-    my $updated_time = $self->public_updated_time;
-    unless ($LAST_PUBLIC_MEMOS_CACHED == $updated_time) {
-        %PUBLIC_MEMOS_OF = ();
-    }
-
-    if ($LAST_PUBLIC_MEMOS_CACHED == $updated_time) {
-        return $PUBLIC_MEMOS_OF{$page} if $PUBLIC_MEMOS_OF{$page};
-    }
-        
-    my $memos = $self->dbh->select_all(
-        sprintf("SELECT id, title, user, username, created_at FROM memos WHERE seq_public BETWEEN %d AND %d ORDER BY seq_public", $page * 100 + 1, ($page+1) * 100)
-    );
-
-    if (0 && $updated_time) {
-        $PUBLIC_MEMOS_OF{$page} = $memos;
-        $LAST_PUBLIC_MEMOS_CACHED = $updated_time;
-    }
-    return $memos;
 }
 
 sub load_config {
@@ -98,6 +61,25 @@ sub dbh {
     };
 }
 
+# proc cache
+my $USERS;
+my %USER_OF;
+my %USERNAME_OF;
+
+sub user {
+    my ($self, $id) = @_;
+    $USERS ||= $self->dbh->select_all("SELECT * FROM users");
+    %USER_OF = map { $_->{id} => $_ } @$USERS unless %USER_OF;
+    return $USER_OF{$id};
+}
+
+sub username {
+    my ($self, $id) = @_;
+    $USERS ||= $self->dbh->select_all("SELECT * FROM users");
+    %USERNAME_OF = map { $_->{id} => $_->{username} } @$USERS unless %USERNAME_OF;
+    return $USERNAME_OF{$id};
+}
+
 filter 'session' => sub {
     my ($app) = @_;
     sub {
@@ -115,11 +97,10 @@ filter 'get_user' => sub {
         my ($self, $c) = @_;
 
         my $user_id = $c->req->env->{"psgix.session"}->{user_id};
-        my $user = $USER_OF{$user_id} || $self->dbh->select_row(
+        my $user = $self->user($user_id) || $self->dbh->select_row(
             'SELECT * FROM users WHERE id=?',
             $user_id,
         );
-        $USER_OF{$user_id} ||= $user;
 
         $c->stash->{user} = $user;
         $c->res->header('Cache-Control', 'private') if $user;
@@ -156,8 +137,9 @@ get '/' => [qw(session get_user)] => sub {
 
     my $total = $self->seq_public();
     my $memos = $self->dbh->select_all(
-        sprintf("SELECT id, title, user, username, created_at FROM memos WHERE seq_public > 0 ORDER BY seq_public DESC LIMIT 100")
+        sprintf("SELECT id, title, user, created_at FROM memos WHERE seq_public > 0 ORDER BY seq_public DESC LIMIT 100")
     );
+    $_->{username} = $self->username($_->{user}) for @$memos;
     $c->render('index.tx', {
         memos => $memos,
         page  => 0,
@@ -169,7 +151,10 @@ get '/recent/:page' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     my $page  = int $c->args->{page};
     my $total = $self->seq_public();
-    my $memos = $self->get_public_memos_by_page($page);
+    my $memos = $self->dbh->select_all(
+        sprintf("SELECT id, title, user, created_at FROM memos WHERE seq_public BETWEEN %d AND %d ORDER BY seq_public", $page * 100 + 1, ($page+1) * 100)
+    );
+    $_->{username} = $self->username($_->{user}) for @$memos;
     if ( @$memos == 0 ) {
         return $c->halt(404);
     }
@@ -266,9 +251,8 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
     my $title = $lines[0];
 
     $self->dbh->query(
-        'INSERT INTO memos (user, username, title, content, is_private, seq_public, created_at) VALUES (?, ?, ?, ?, ?, ?, now())',
+        'INSERT INTO memos (user, title, content, is_private, seq_public, created_at) VALUES (?, ?, ?, ?, ?, now())',
         $c->stash->{user}->{id},
-        $c->stash->{user}->{username},
         $title,
         $content,
         $is_private,
@@ -283,7 +267,7 @@ get '/memo/:id' => [qw(session get_user)] => sub {
 
     my $user = $c->stash->{user};
     my $memo = $self->dbh->select_row(
-        'SELECT id, user, username, content, is_private, created_at, updated_at FROM memos WHERE id=?',
+        'SELECT id, user, content, is_private, created_at, updated_at FROM memos WHERE id=?',
         $c->args->{id},
     );
     unless ($memo) {
@@ -294,6 +278,7 @@ get '/memo/:id' => [qw(session get_user)] => sub {
             $c->halt(404);
         }
     }
+    $memo->{username} = $self->username($memo->{user});
     $memo->{content_html} = markdown($memo->{content});
 
     my $cond;

@@ -1,7 +1,10 @@
 use strict;
 use warnings;
 use utf8;
+use Cache::Memcached::Fast;
 use DBIx::Sunny;
+
+my $start = time();
 
 my $dbh = DBIx::Sunny->connect( "dbi:mysql:database=isucon",
                                 "root",
@@ -15,31 +18,35 @@ my $dbh = DBIx::Sunny->connect( "dbi:mysql:database=isucon",
                                 }
                             );
 
+my $cache = Cache::Memcached::Fast->new({
+    servers => [ {address => '127.0.0.1:11212'}],
+});
+
 sub d { use Data::Dumper; print Dumper(@_); }
 
-my $users = $dbh->select_all("SELECT * FROM users");
-my %NAME_OF = map { $_->{id} => $_->{username} } @{$users};
+$dbh->query("ALTER TABLE memos ENGINE MyISAM");
+$dbh->query("ALTER TABLE memos ADD seq_public INT(11) NOT NULL");
+$dbh->query("ALTER TABLE memos ADD title VARCHAR(255) NOT NULL");
+$dbh->query("ALTER TABLE memos ADD INDEX i1 (seq_public)");
+$dbh->query("ALTER TABLE memos ADD INDEX i2 (user, id)");
+my $seq_public = 0;
+$dbh->query("UPDATE seq_public SET id=?", $seq_public);
 
-my $memos = $dbh->select_all("SELECT * FROM memos ORDER BY id");
-
-my $seq_public = $dbh->select_one("SELECT id FROM seq_public");
+my $memos = $dbh->select_all("SELECT id, is_private, content FROM memos ORDER BY id");
 for my $memo (@$memos) {
-    if (!$memo->{is_private} && !$memo->{seq_public}) {
+    my $title = (split(/\r?\n/, $memo->{content}, 2))[0];
+    
+    if (!$memo->{is_private}) {
         $seq_public++;
         print "$seq_public\n";
-        $dbh->query("UPDATE memos SET seq_public=? WHERE id=?", $seq_public, $memo->{id});
-    } 
-
-    unless ($memo->{title}) {
-        my @lines = split(/\r?\n/, $memo->{content}, 2);
-        my $title = $lines[0];
+        $dbh->query("UPDATE memos SET title=?, seq_public=? WHERE id=?", $title, $seq_public, $memo->{id});
+    } else {
         $dbh->query("UPDATE memos SET title=? WHERE id=?", $title, $memo->{id});
     }
-
-    unless ($memo->{username}) {
-        $dbh->query("UPDATE memos SET username=? WHERE id=?", $NAME_OF{$memo->{user}}, $memo->{id});
-    }
-        
 }
 
 $dbh->query("UPDATE seq_public SET id=?", $seq_public);
+$cache->set("seq_public" => $seq_public);
+
+my $elapsed_time = time()-$start;
+print scalar(@$memos)."memos update done ($elapsed_time sec)\n";
