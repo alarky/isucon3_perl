@@ -40,7 +40,7 @@ for my $memo (@$memos) {
     $memo->{content_html} = markdown($memo->{content});
     delete $memo->{content};
     my $json_memo = encode_json($memo);
-    $redis->rpush('memos', $json_memo);
+    $redis->hset('memos', $memo->{id}, $json_memo);
 
     $memo->{title} = $title;
     delete $memo->{content_html};

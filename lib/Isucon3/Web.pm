@@ -246,7 +246,7 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
         created_at => strftime("%Y-%m-%d %H:%M:%S",localtime),
     };
     my $json_memo = encode_json($memo);
-    $self->redis->rpush('memos', $json_memo);
+    $self->redis->hset('memos', $memo_id, $json_memo);
 
     $memo->{title} = $title;
     delete $memo->{content_html};
@@ -264,10 +264,12 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
     my $user = $c->stash->{user};
-    my $index = $c->args->{id} - 1;
-    my $memo = $self->redis->lindex('memos', $index);
-    unless ($memo) {
+    unless ($self->redis->hexists('memos', $c->args->{id})) {
         $c->halt(404);
+    }
+    my $memo = $self->redis->hget('memos', $c->args->{id});
+    unless ($memo) {
+        $c->halt(500);
     }
     $memo = decode_json($memo);
     if ($memo->{is_private} == 1) {
