@@ -14,25 +14,14 @@ use Time::Piece;
 use Cache::Memcached::Fast;
 use Text::Markdown::Discount qw/markdown/;
 use Time::HiRes qw/gettimeofday/;
+use Redis;
+use JSON::XS;
+use POSIX qw/strftime/;
 
 # memcache
 my $cache = Cache::Memcached::Fast->new({
     servers => [ {address => '127.0.0.1:11212'}],
 });
-
-sub seq_public {
-    my ($self, $update) = @_;
-    my $key = "seq_public";
-    unless ($update) {
-        my $seq_public = $cache->get($key);
-        return $seq_public if $seq_public;
-    }
-    my $seq_public = $self->dbh->select_one(
-        'SELECT id FROM seq_public'
-    );
-    $cache->set($key => $seq_public);
-    return $seq_public;
-}
 
 sub load_config {
     my $self = shift;
@@ -59,6 +48,11 @@ sub dbh {
             },
         );
     };
+}
+
+sub redis {
+    my ($self) = @_;
+    $self->{_redis} ||= Redis->new;
 }
 
 # proc cache
@@ -136,11 +130,9 @@ filter 'anti_csrf' => sub {
 get '/' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
-    my $total = $self->seq_public();
-    my $memos = $self->dbh->select_all(
-        sprintf("SELECT id, title, user, created_at FROM memos WHERE seq_public > 0 ORDER BY seq_public DESC LIMIT 100")
-    );
-    $_->{username} = $self->username($_->{user}) for @$memos;
+    my $total = $self->redis->llen('public_memos');
+    my $memos = $self->redis->lrange('public_memos', -100, -1);
+    $memos = [ reverse map { decode_json($_) } @$memos ];
     $c->render('index.tx', {
         memos => $memos,
         page  => 0,
@@ -151,11 +143,9 @@ get '/' => [qw(session get_user)] => sub {
 get '/recent/:page' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     my $page  = int $c->args->{page};
-    my $total = $self->seq_public();
-    my $memos = $self->dbh->select_all(
-        sprintf("SELECT id, title, user, created_at FROM memos WHERE seq_public BETWEEN %d AND %d ORDER BY seq_public", $page * 100 + 1, ($page+1) * 100)
-    );
-    $_->{username} = $self->username($_->{user}) for @$memos;
+    my $total = $self->redis->llen('public_memos');
+    my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
+    $memos = [ map { decode_json($_) } @$memos ];
     if ( @$memos == 0 ) {
         return $c->halt(404);
     }
@@ -227,10 +217,8 @@ post '/signin' => [qw(session)] => sub {
 get '/mypage' => [qw(session get_user require_user)] => sub {
     my ($self, $c) = @_;
 
-    my $memos = $self->dbh->select_all(
-        'SELECT id, title, is_private, created_at, updated_at FROM memos WHERE user=? ORDER BY id DESC',
-        $c->stash->{user}->{id},
-    );
+    my $memos = $self->redis->lrange('user_memos_'.$c->stash->{user}->{id}, 0, -1);
+    $memos = [ map { decode_json($_) } @$memos ];
     $c->render('mypage.tx', { memos => $memos });
 };
 
@@ -238,28 +226,36 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
     my ($self, $c) = @_;
 
     my $is_private = scalar($c->req->param('is_private')) ? 1 : 0;
-    my $seq_public = 0;
-    if ($is_private) {
-        # todo
-    } else {
-        $self->dbh->query("UPDATE seq_public SET id=LAST_INSERT_ID(id+1)");
-        $seq_public = $self->dbh->last_insert_id;
-        $self->seq_public(my $update = 1);
-    }
+
+    $self->redis->multi;
+    $self->dbh->query("UPDATE seq_memo SET id=LAST_INSERT_ID(id+1)");
+    my $memo_id = $self->dbh->last_insert_id;
+    $self->redis->set('seq_memo', $memo_id);
 
     my $content = scalar $c->req->param('content');
     my @lines = split(/\r?\n/, $content, 2);
     my $title = $lines[0];
 
-    $self->dbh->query(
-        'INSERT INTO memos (user, title, content, is_private, seq_public, created_at) VALUES (?, ?, ?, ?, ?, now())',
-        $c->stash->{user}->{id},
-        $title,
-        $content,
-        $is_private,
-        $seq_public
-    );
-    my $memo_id = $self->dbh->last_insert_id;
+    my $memo = +{
+        id => $memo_id,
+        user => $c->stash->{user}->{id},
+        content_html => markdown($content),
+        is_private => $is_private,
+        created_at => strftime("%Y-%m-%d %H:%M:%S",localtime),
+    };
+    $memo->{username} = $self->username($memo->{user});
+    my $json_memo = encode_json($memo);
+    $self->redis->hset('memos', $memo_id, $json_memo);
+
+    $memo->{title} = $title;
+    delete $memo->{content_html};
+    $json_memo = encode_json($memo);
+    $self->redis->rpush('user_memos_'.$memo->{user}, $json_memo);
+    if (!$is_private) {
+        $self->redis->rpush('public_memos', $json_memo);
+    }
+    $self->redis->exec;
+
     $c->redirect('/memo/' . $memo_id);
 };
 
@@ -267,38 +263,33 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
     my $user = $c->stash->{user};
-    my $memo = $self->dbh->select_row(
-        'SELECT id, user, content, is_private, created_at, updated_at FROM memos WHERE id=?',
-        $c->args->{id},
-    );
-    unless ($memo) {
+    unless ($self->redis->hexists('memos', $c->args->{id})) {
         $c->halt(404);
     }
-    if ($memo->{is_private}) {
+    my $memo = $self->redis->hget('memos', $c->args->{id});
+    unless ($memo) {
+        $c->halt(500);
+    }
+    $memo = decode_json($memo);
+    if ($memo->{is_private} == 1) {
         if ( !$user || $user->{id} != $memo->{user} ) {
             $c->halt(404);
         }
     }
-    $memo->{username} = $self->username($memo->{user});
-    $memo->{content_html} = markdown($memo->{content});
 
-    my $cond;
-    if ($user && $user->{id} == $memo->{user}) {
-        $cond = "ORDER BY id";
-    }
-    else {
-        $cond = "AND seq_public>0 ORDER BY seq_public";
-    }
-
-    my $memos = $self->dbh->select_all(
-        "SELECT id FROM memos WHERE user=? $cond",
-        $memo->{user},
-    );
     my ($newer, $older);
-    for my $i ( 0 .. scalar @$memos - 1 ) {
-        if ( $memos->[$i]->{id} eq $memo->{id} ) {
-            $older = $memos->[ $i - 1 ] if $i > 0;
-            $newer = $memos->[ $i + 1 ] if $i < @$memos;
+    my $user_memos = $self->redis->lrange('user_memos_'.$memo->{user}, 0, -1);
+    $user_memos = [ map { decode_json($_) } @$user_memos ];
+    unless ($user && $user->{id} == $memo->{user}) {
+        $user_memos = [ grep { $_->{is_private} == 0 } @$user_memos ];
+    }
+    
+    while (my ($i, $user_memo) = each @$user_memos) {
+        if ($user_memo->{id} == $memo->{id}) {
+            my $n = $i+1;
+            $newer = $user_memos->[$n] if $user_memos->[$n];
+            my $o = $i-1;
+            $older = $user_memos->[$o] if $o >= 0;
         }
     }
 

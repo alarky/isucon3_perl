@@ -1,8 +1,12 @@
 use strict;
 use warnings;
 use utf8;
-use Cache::Memcached::Fast;
 use DBIx::Sunny;
+use Redis;
+use JSON::XS;
+use Text::Markdown::Discount qw/markdown/;
+
+sub d { use Data::Dumper; print Dumper(@_); }
 
 my $start = time();
 
@@ -17,36 +21,44 @@ my $dbh = DBIx::Sunny->connect( "dbi:mysql:database=isucon",
                                     mysql_auto_reconnect => 1,
                                 }
                             );
+my $redis = Redis->new;
 
-my $cache = Cache::Memcached::Fast->new({
-    servers => [ {address => '127.0.0.1:11212'}],
-});
+print "load data\n";
+my $users = $dbh->select_all("SELECT id FROM users");
+my %USERNAME_OF = map { $_->{id} => $_->{username} } @$users;
+my $memos = $dbh->select_all("SELECT * FROM memos ORDER BY id");
 
-sub d { use Data::Dumper; print Dumper(@_); }
+print "reset redis\n";
+$redis->flushall;
 
-$dbh->query("ALTER TABLE memos ENGINE MyISAM");
-$dbh->query("ALTER TABLE memos ADD seq_public INT(11) NOT NULL");
-$dbh->query("ALTER TABLE memos ADD title VARCHAR(255) NOT NULL");
-$dbh->query("ALTER TABLE memos ADD INDEX i1 (seq_public)");
-$dbh->query("ALTER TABLE memos ADD INDEX i2 (user, id)");
-my $seq_public = 0;
-$dbh->query("UPDATE seq_public SET id=?", $seq_public);
-
-my $memos = $dbh->select_all("SELECT id, is_private, content FROM memos ORDER BY id");
+print "trans ".scalar(@$memos)." memos\n";
 for my $memo (@$memos) {
+    print $memo->{id},"\n" if !($memo->{id}%100);
+
+    $memo->{username} = $USERNAME_OF{$memo->{user}};
     my $title = (split(/\r?\n/, $memo->{content}, 2))[0];
-    
+
+    delete $memo->{updated_at};
+
+    $memo->{content_html} = markdown($memo->{content});
+    delete $memo->{content};
+    my $json_memo = encode_json($memo);
+    $redis->hset('memos', $memo->{id}, $json_memo);
+
+    $memo->{title} = $title;
+    delete $memo->{content_html};
+    $json_memo = encode_json($memo);
+
+    $redis->rpush("user_memos_".$memo->{user}, $json_memo);
     if (!$memo->{is_private}) {
-        $seq_public++;
-        print "$seq_public\n";
-        $dbh->query("UPDATE memos SET title=?, seq_public=? WHERE id=?", $title, $seq_public, $memo->{id});
-    } else {
-        $dbh->query("UPDATE memos SET title=? WHERE id=?", $title, $memo->{id});
+        $redis->rpush("public_memos", $json_memo);
     }
 }
+$dbh->query("UPDATE seq_memo SET id=?", $memos->[-1]->{id});
+$redis->set('seq_memo', $memos->[-1]->{id});
 
-$dbh->query("UPDATE seq_public SET id=?", $seq_public);
-$cache->set("seq_public" => $seq_public);
+print "pub len: ", $redis->llen("public_memos"), "\n";
 
 my $elapsed_time = time()-$start;
-print scalar(@$memos)."memos update done ($elapsed_time sec)\n";
+print "initialize done ($elapsed_time sec)\n";
+
