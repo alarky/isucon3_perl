@@ -25,6 +25,7 @@ my $redis = Redis->new;
 
 print "load data\n";
 my $users = $dbh->select_all("SELECT id FROM users");
+my %USERNAME_OF = map { $_->{id} => $_->{username} } @$users;
 my $memos = $dbh->select_all("SELECT * FROM memos ORDER BY id");
 
 print "reset redis\n";
@@ -33,6 +34,8 @@ $redis->flushall;
 print "trans ".scalar(@$memos)." memos\n";
 for my $memo (@$memos) {
     print $memo->{id},"\n" if !($memo->{id}%100);
+
+    $memo->{username} = $USERNAME_OF{$memo->{user}};
     my $title = (split(/\r?\n/, $memo->{content}, 2))[0];
 
     delete $memo->{updated_at};

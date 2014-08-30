@@ -133,7 +133,6 @@ get '/' => [qw(session get_user)] => sub {
     my $total = $self->redis->llen('public_memos');
     my $memos = $self->redis->lrange('public_memos', -100, -1);
     $memos = [ reverse map { decode_json($_) } @$memos ];
-    $_->{username} = $self->username($_->{user}) for @$memos;
     $c->render('index.tx', {
         memos => $memos,
         page  => 0,
@@ -147,7 +146,6 @@ get '/recent/:page' => [qw(session get_user)] => sub {
     my $total = $self->redis->llen('public_memos');
     my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
     $memos = [ map { decode_json($_) } @$memos ];
-    $_->{username} = $self->username($_->{user}) for @$memos;
     if ( @$memos == 0 ) {
         return $c->halt(404);
     }
@@ -245,6 +243,7 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
         is_private => $is_private,
         created_at => strftime("%Y-%m-%d %H:%M:%S",localtime),
     };
+    $memo->{username} = $self->username($memo->{user});
     my $json_memo = encode_json($memo);
     $self->redis->hset('memos', $memo_id, $json_memo);
 
@@ -277,7 +276,6 @@ get '/memo/:id' => [qw(session get_user)] => sub {
             $c->halt(404);
         }
     }
-    $memo->{username} = $self->username($memo->{user});
 
     my ($newer, $older);
     my $user_memos = $self->redis->lrange('user_memos_'.$memo->{user}, 0, -1);
