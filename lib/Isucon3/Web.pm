@@ -68,6 +68,7 @@ my %USERNAME_OF;
 
 sub user {
     my ($self, $id) = @_;
+    return unless $id;
     $USERS ||= $self->dbh->select_all("SELECT * FROM users");
     %USER_OF = map { $_->{id} => $_ } @$USERS unless %USER_OF;
     return $USER_OF{$id};
