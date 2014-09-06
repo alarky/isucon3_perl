@@ -17,6 +17,9 @@ use Time::HiRes qw/gettimeofday/;
 use Redis;
 use JSON::XS;
 use POSIX qw/strftime/;
+use MongoDB;
+
+sub d { use Data::Dumper; print Dumper(@_); }
 
 # memcache
 my $cache = Cache::Memcached::Fast->new({
@@ -53,6 +56,31 @@ sub dbh {
 sub redis {
     my ($self) = @_;
     $self->{_redis} ||= Redis->new;
+}
+
+sub db {
+    my ($self) = @_;
+    $self->{_db} ||= MongoDB::MongoClient->new->get_database('isucon3');
+}
+
+sub seq {
+    my ($self) = @_;
+    $self->{_seq} ||= $self->db->get_collection('seq');
+}
+
+sub memos {
+    my ($self) = @_;
+    $self->{_memos} ||= $self->db->get_collection('memos');
+}
+
+sub user_memos {
+    my ($self) = @_;
+    $self->{_user_memos} ||= $self->db->get_collection('user_memos');
+}
+
+sub public_memos {
+    my ($self) = @_;
+    $self->{_public_memos} ||= $self->db->get_collection('public_memos');
 }
 
 # proc cache
@@ -130,11 +158,10 @@ filter 'anti_csrf' => sub {
 get '/' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', -100, -1);
-    $memos = [ reverse map { decode_json($_) } @$memos ];
+    my $total = $self->public_memos->count;
+    my @memos = $self->public_memos->query->sort({ _id => -1 })->limit(100)->all;
     $c->render('index.tx', {
-        memos => $memos,
+        memos => \@memos,
         page  => 0,
         total => $total,
     });
@@ -143,14 +170,13 @@ get '/' => [qw(session get_user)] => sub {
 get '/recent/:page' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     my $page  = int $c->args->{page};
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
-    $memos = [ map { decode_json($_) } @$memos ];
-    if ( @$memos == 0 ) {
+    my $total = $self->public_memos->count;
+    my @memos = $self->public_memos->query->sort({ _id => 1 })->skip($page*100)->limit(100)->all;
+    unless (@memos) {
         return $c->halt(404);
     }
     $c->render('index.tx', {
-        memos => $memos,
+        memos => \@memos,
         page  => $page,
         total => $total,
     });
@@ -217,9 +243,8 @@ post '/signin' => [qw(session)] => sub {
 get '/mypage' => [qw(session get_user require_user)] => sub {
     my ($self, $c) = @_;
 
-    my $memos = $self->redis->lrange('user_memos_'.$c->stash->{user}->{id}, 0, -1);
-    $memos = [ map { decode_json($_) } @$memos ];
-    $c->render('mypage.tx', { memos => $memos });
+    my @memos = $self->memos->find({ user => int($c->stash->{user}->{id}) })->all;
+    $c->render('mypage.tx', { memos => \@memos });
 };
 
 post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
@@ -227,50 +252,42 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
 
     my $is_private = scalar($c->req->param('is_private')) ? 1 : 0;
 
-    $self->redis->multi;
-    $self->dbh->query("UPDATE seq_memo SET id=LAST_INSERT_ID(id+1)");
-    my $memo_id = $self->dbh->last_insert_id;
-    $self->redis->set('seq_memo', $memo_id);
+    my $seq_memo = $self->seq->find_and_modify({ query => { _id => 'memo' }, update => { '$inc' => { seq => 1 } }, new => 1 });
+    my $memo_id = $seq_memo->{seq};
 
     my $content = scalar $c->req->param('content');
     my @lines = split(/\r?\n/, $content, 2);
     my $title = $lines[0];
 
     my $memo = +{
-        id => $memo_id,
-        user => $c->stash->{user}->{id},
+        _id => $memo_id,
+        user => int($c->stash->{user}->{id}),
+        title => $title,
         content_html => markdown($content),
         is_private => $is_private,
         created_at => strftime("%Y-%m-%d %H:%M:%S",localtime),
     };
     $memo->{username} = $self->username($memo->{user});
-    my $json_memo = encode_json($memo);
-    $self->redis->hset('memos', $memo_id, $json_memo);
+    $self->memos->insert($memo);
 
-    $memo->{title} = $title;
-    delete $memo->{content_html};
-    $json_memo = encode_json($memo);
-    $self->redis->rpush('user_memos_'.$memo->{user}, $json_memo);
     if (!$is_private) {
-        $self->redis->rpush('public_memos', $json_memo);
+        delete $memo->{content_html};
+        $self->public_memos->insert($memo);
     }
-    $self->redis->exec;
 
     $c->redirect('/memo/' . $memo_id);
 };
 
 get '/memo/:id' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
+    my $id = int($c->args->{id});
 
-    my $user = $c->stash->{user};
-    unless ($self->redis->hexists('memos', $c->args->{id})) {
+    my $memo = $self->memos->find_one({ _id => $id });
+    unless ($memo) {
         $c->halt(404);
     }
-    my $memo = $self->redis->hget('memos', $c->args->{id});
-    unless ($memo) {
-        $c->halt(500);
-    }
-    $memo = decode_json($memo);
+
+    my $user = $c->stash->{user};
     if ($memo->{is_private} == 1) {
         if ( !$user || $user->{id} != $memo->{user} ) {
             $c->halt(404);
@@ -278,18 +295,19 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     }
 
     my ($newer, $older);
-    my $user_memos = $self->redis->lrange('user_memos_'.$memo->{user}, 0, -1);
-    $user_memos = [ map { decode_json($_) } @$user_memos ];
-    unless ($user && $user->{id} == $memo->{user}) {
-        $user_memos = [ grep { $_->{is_private} == 0 } @$user_memos ];
+    my @user_memos;
+    if ($user && $user->{id} == $memo->{user}) {
+        @user_memos = $self->memos->find({ user => $memo->{user} })->sort({ _id => 1 })->all;
+    } else {
+        @user_memos = $self->memos->find({ user => $memo->{user}, is_private => 0 })->sort({ _id => 1 })->all;
     }
     
-    while (my ($i, $user_memo) = each @$user_memos) {
-        if ($user_memo->{id} == $memo->{id}) {
+    while (my ($i, $user_memo) = each @user_memos) {
+        if ($user_memo->{_id} == $memo->{_id}) {
             my $n = $i+1;
-            $newer = $user_memos->[$n] if $user_memos->[$n];
+            $newer = $user_memos[$n] if $user_memos[$n];
             my $o = $i-1;
-            $older = $user_memos->[$o] if $o >= 0;
+            $older = $user_memos[$o] if $o >= 0;
         }
     }
 

@@ -8,7 +8,7 @@
 <ul id="memos">
 : for $memos -> $memo {
 <li>
-  <a href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $memo.id :>"><: $memo.title :></a> by <: $memo.username :> (<: $memo.created_at :>)
+  <a href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $memo._id :>"><: $memo.title :></a> by <: $memo.username :> (<: $memo.created_at :>)
 </li>
 : }
 </ul>

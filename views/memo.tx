@@ -12,11 +12,11 @@ Memo by <: $memo.username :> (<: $memo.created_at :>)
 
 <hr>
 : if $older {
-<a id="older" href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $older.id :>">&lt; older memo</a>
+<a id="older" href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $older._id :>">&lt; older memo</a>
 : }
 |
 : if $newer {
-<a id="newer" href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $newer.id :>">newer memo &gt;</a>
+<a id="newer" href="http://<: $c.req.env.HTTP_HOST :>/memo/<: $newer._id :>">newer memo &gt;</a>
 : }
 
 <hr>
