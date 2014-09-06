@@ -31,7 +31,7 @@ sub load_config {
 
 sub redis {
     my ($self) = @_;
-    $self->{_redis} ||= Redis->new;
+    $self->{_redis} ||= Redis->new(sock => '/tmp/redis.sock');
 }
 
 # proc cache

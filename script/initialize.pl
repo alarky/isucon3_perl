@@ -21,7 +21,7 @@ my $dbh = DBIx::Sunny->connect( "dbi:mysql:database=isucon",
                                     mysql_auto_reconnect => 1,
                                 }
                             );
-my $redis = Redis->new;
+my $redis = Redis->new(sock => '/tmp/redis.sock');
 
 print "reset redis\n";
 $redis->flushall;
