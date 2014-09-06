@@ -18,11 +18,6 @@ use Redis;
 use JSON::XS;
 use POSIX qw/strftime/;
 
-# memcache
-my $cache = Cache::Memcached::Fast->new({
-    servers => [ {address => '127.0.0.1:11212'}],
-});
-
 sub load_config {
     my $self = shift;
     $self->{_config} ||= do {
@@ -31,22 +26,6 @@ sub load_config {
         my $json = do { local $/; <$fh> };
         close($fh);
         decode_json($json);
-    };
-}
-
-sub dbh {
-    my ($self) = @_;
-    $self->{_dbh} ||= do {
-        my $dbconf = $self->load_config->{database};
-        DBIx::Sunny->connect(
-            "dbi:mysql:database=${$dbconf}{dbname};host=${$dbconf}{host};port=${$dbconf}{port}", $dbconf->{username}, $dbconf->{password}, {
-                RaiseError => 1,
-                PrintError => 0,
-                AutoInactiveDestroy => 1,
-                mysql_enable_utf8   => 1,
-                mysql_auto_reconnect => 1,
-            },
-        );
     };
 }
 
@@ -133,35 +112,6 @@ filter 'anti_csrf' => sub {
     };
 };
 
-get '/' => [qw(session get_user)] => sub {
-    my ($self, $c) = @_;
-
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', -100, -1);
-    $memos = [ reverse map { decode_json($_) } @$memos ];
-    $c->render('index.tx', {
-        memos => $memos,
-        page  => 0,
-        total => $total,
-    });
-};
-
-get '/recent/:page' => [qw(session get_user)] => sub {
-    my ($self, $c) = @_;
-    my $page  = int $c->args->{page};
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
-    $memos = [ map { decode_json($_) } @$memos ];
-    if ( @$memos == 0 ) {
-        return $c->halt(404);
-    }
-    $c->render('index.tx', {
-        memos => $memos,
-        page  => $page,
-        total => $total,
-    });
-};
-
 get '/signin' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     $c->render('signin.tx', {});
@@ -216,6 +166,35 @@ post '/signin' => [qw(session)] => sub {
     }
 };
 
+get '/' => [qw(session get_user)] => sub {
+    my ($self, $c) = @_;
+
+    my $total = $self->redis->llen('public_memos');
+    my $memos = $self->redis->lrange('public_memos', -100, -1);
+    $memos = [ reverse map { decode_json($_) } @$memos ];
+    $c->render('index.tx', {
+        memos => $memos,
+        page  => 0,
+        total => $total,
+    });
+};
+
+get '/recent/:page' => [qw(session get_user)] => sub {
+    my ($self, $c) = @_;
+    my $page  = int $c->args->{page};
+    my $total = $self->redis->llen('public_memos');
+    my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
+    $memos = [ map { decode_json($_) } @$memos ];
+    if ( @$memos == 0 ) {
+        return $c->halt(404);
+    }
+    $c->render('index.tx', {
+        memos => $memos,
+        page  => $page,
+        total => $total,
+    });
+};
+
 get '/mypage' => [qw(session get_user require_user)] => sub {
     my ($self, $c) = @_;
 
@@ -261,12 +240,9 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
     my $user = $c->stash->{user};
-    unless ($self->redis->hexists('memos', $c->args->{id})) {
-        $c->halt(404);
-    }
     my $memo = $self->redis->hget('memos', $c->args->{id});
     unless ($memo) {
-        $c->halt(500);
+        $c->halt(404);
     }
     $memo = decode_json($memo);
     if ($memo->{is_private} == 1) {
