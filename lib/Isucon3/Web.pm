@@ -227,10 +227,7 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
 
     my $is_private = scalar($c->req->param('is_private')) ? 1 : 0;
 
-    $self->redis->multi;
-    $self->dbh->query("UPDATE seq_memo SET id=LAST_INSERT_ID(id+1)");
-    my $memo_id = $self->dbh->last_insert_id;
-    $self->redis->set('seq_memo', $memo_id);
+    my $memo_id = $self->redis->incr('seq_memo');
 
     my $content = scalar $c->req->param('content');
     my @lines = split(/\r?\n/, $content, 2);
@@ -254,7 +251,6 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
     if (!$is_private) {
         $self->redis->rpush('public_memos', $json_memo);
     }
-    $self->redis->exec;
 
     $c->redirect('/memo/' . $memo_id);
 };
