@@ -58,19 +58,28 @@ sub redis {
 # proc cache
 my $USERS;
 my %USER_OF;
+my %NAME_TO_USER;
 my %USERNAME_OF;
 
 sub user {
     my ($self, $id) = @_;
     return unless $id;
-    $USERS ||= $self->dbh->select_all("SELECT * FROM users");
+    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
     %USER_OF = map { $_->{id} => $_ } @$USERS unless %USER_OF;
     return $USER_OF{$id};
 }
 
+sub user_by_name {
+    my ($self, $name) = @_;
+    return unless $name;
+    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
+    %NAME_TO_USER = map { $_->{username} => $_ } @$USERS unless %NAME_TO_USER;
+    return $NAME_TO_USER{$name};
+}
+
 sub username {
     my ($self, $id) = @_;
-    $USERS ||= $self->dbh->select_all("SELECT * FROM users");
+    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
     %USERNAME_OF = map { $_->{id} => $_->{username} } @$USERS unless %USERNAME_OF;
     return $USERNAME_OF{$id};
 }
@@ -92,10 +101,7 @@ filter 'get_user' => sub {
         my ($self, $c) = @_;
 
         my $user_id = $c->req->env->{"psgix.session"}->{user_id};
-        my $user = $self->user($user_id) || $self->dbh->select_row(
-            'SELECT * FROM users WHERE id=?',
-            $user_id,
-        );
+        my $user = $self->user($user_id);
 
         $c->stash->{user} = $user;
         $c->res->header('Cache-Control', 'private') if $user;
@@ -173,21 +179,20 @@ post '/signup' => [qw(session anti_csrf)] => sub {
 
     my $username = $c->req->param("username");
     my $password = $c->req->param("password");
-    my $user = $self->dbh->select_row(
-        'SELECT id, username, password, salt FROM users WHERE username=?',
-        $username,
-    );
+    my $user = $self->user_by_name($username);
     if ($user) {
         $c->halt(400);
     }
     else {
         my $salt = substr( sha256_hex( time() . $username ), 0, 8 );
         my $password_hash = sha256_hex( $salt, $password );
-        $self->dbh->query(
-            'INSERT INTO users (username, password, salt) VALUES (?, ?, ?)',
-            $username, $password_hash, $salt,
-        );
-        my $user_id = $self->dbh->last_insert_id;
+        $self->redis->rpush('users',+{
+            id => 9999, # TODO
+            username => $username,
+            password => $password_hash,
+            salt => $salt,
+        });
+        my $user_id = 9999; # TODO
         $c->req->env->{"psgix.session"}->{user_id} = $user_id;
         $c->redirect('/mypage');
     }
@@ -198,10 +203,7 @@ post '/signin' => [qw(session)] => sub {
 
     my $username = $c->req->param("username");
     my $password = $c->req->param("password");
-    my $user = $self->dbh->select_row(
-        'SELECT id, username, password, salt FROM users WHERE username=?',
-        $username,
-    );
+    my $user = $self->user_by_name($username);
     if ( $user && $user->{password} eq sha256_hex($user->{salt} . $password) ) {
         $c->req->env->{"psgix.session.options"}->{change_id} = 1;
         my $session = $c->req->env->{"psgix.session"};

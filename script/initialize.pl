@@ -23,14 +23,21 @@ my $dbh = DBIx::Sunny->connect( "dbi:mysql:database=isucon",
                             );
 my $redis = Redis->new;
 
-print "load data\n";
-my $users = $dbh->select_all("SELECT id FROM users");
-my %USERNAME_OF = map { $_->{id} => $_->{username} } @$users;
-my $memos = $dbh->select_all("SELECT * FROM memos ORDER BY id");
-
 print "reset redis\n";
 $redis->flushall;
 
+print "load data\n";
+my $users = $dbh->select_all("SELECT * FROM users");
+my %USERNAME_OF = map { $_->{id} => $_->{username} } @$users;
+
+print "trans ".scalar(@$users)." users\n";
+for my $user (@$users) {
+    print $user->{id},"\n" if !($user->{id}%100);
+    my $json_user = encode_json($user);
+    $redis->rpush('users', $json_user);
+}
+
+my $memos = $dbh->select_all("SELECT * FROM memos ORDER BY id");
 print "trans ".scalar(@$memos)." memos\n";
 for my $memo (@$memos) {
     print $memo->{id},"\n" if !($memo->{id}%100);
@@ -54,7 +61,6 @@ for my $memo (@$memos) {
         $redis->rpush("public_memos", $json_memo);
     }
 }
-$dbh->query("UPDATE seq_memo SET id=?", $memos->[-1]->{id});
 $redis->set('seq_memo', $memos->[-1]->{id});
 
 print "pub len: ", $redis->llen("public_memos"), "\n";
