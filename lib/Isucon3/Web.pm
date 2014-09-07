@@ -177,11 +177,13 @@ get '/' => [qw(session get_user)] => sub {
     my $total = $self->redis->llen('public_memos');
     my $memos = $self->redis->lrange('public_memos', -100, -1);
     $memos = [ reverse map { decode_json($_) } @$memos ];
-    $c->render('index.tx', {
+    my $res = $c->render('index.tx', {
         memos => $memos,
         page  => 0,
         total => $total,
     });
+    $self->memd->set('cache_/'.$c->stash->{session_id}, $c->res->body, 1);
+    return $res;
 };
 
 get '/recent/:page' => [qw(session get_user)] => sub {
@@ -193,11 +195,13 @@ get '/recent/:page' => [qw(session get_user)] => sub {
     if ( @$memos == 0 ) {
         return $c->halt(404);
     }
-    $c->render('index.tx', {
+    my $res = $c->render('index.tx', {
         memos => $memos,
         page  => $page,
         total => $total,
     });
+    $self->memd->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 5);
+    return $res;
 };
 
 get '/mypage' => [qw(session get_user require_user)] => sub {
