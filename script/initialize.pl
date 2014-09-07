@@ -69,6 +69,8 @@ print `sudo service memcached restart`;
 print `sudo service supervisord stop`;
 sleep(2);
 print `sudo service supervisord start`;
+sleep(2);
+print `sudo service nginx restart`;
 
 my $elapsed_time = time()-$start;
 print "initialize done ($elapsed_time sec)\n";
