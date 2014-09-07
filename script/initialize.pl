@@ -65,7 +65,10 @@ $redis->set('seq_memo', $memos->[-1]->{id});
 
 print "pub len: ", $redis->llen("public_memos"), "\n";
 
+print `sudo service memcached restart`;
+print `sudo service supervisord stop`;
+sleep(2);
+print `sudo service supervisord start`;
+
 my $elapsed_time = time()-$start;
 print "initialize done ($elapsed_time sec)\n";
-
-print `sudo service memcached restart`
