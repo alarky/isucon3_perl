@@ -200,7 +200,7 @@ get '/recent/:page' => [qw(session get_user)] => sub {
         page  => $page,
         total => $total,
     });
-    $self->memd->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 5);
+    $self->memd->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 100);
     return $res;
 };
 
