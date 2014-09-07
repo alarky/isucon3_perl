@@ -29,44 +29,15 @@ sub load_config {
     };
 }
 
-sub memd {
-    my ($self) = @_;
-    $self->{_memd} ||= Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock', noreply => 1 } ] });
-}
+my $memd       = Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock' } ] });
+my $memd_async = Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock', noreply => 1 } ] });
+my $redis      = Redis->new(sock => '/tmp/redis.sock');
 
-sub redis {
-    my ($self) = @_;
-    $self->{_redis} ||= Redis->new(sock => '/tmp/redis.sock');
-} 
-
-# proc cache
-my $USERS;
-my %USER_OF;
-my %NAME_TO_USER;
-my %USERNAME_OF;
-
-sub user {
-    my ($self, $id) = @_;
-    return unless $id;
-    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
-    %USER_OF = map { $_->{id} => $_ } @$USERS unless %USER_OF;
-    return $USER_OF{$id};
-}
-
-sub user_by_name {
-    my ($self, $name) = @_;
-    return unless $name;
-    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
-    %NAME_TO_USER = map { $_->{username} => $_ } @$USERS unless %NAME_TO_USER;
-    return $NAME_TO_USER{$name};
-}
-
-sub username {
-    my ($self, $id) = @_;
-    $USERS ||= +[ map { decode_json($_) } @{$self->redis->lrange('users', 0, -1)}];
-    %USERNAME_OF = map { $_->{id} => $_->{username} } @$USERS unless %USERNAME_OF;
-    return $USERNAME_OF{$id};
-}
+# preload
+my @USERS = map { decode_json($_) } @{$redis->lrange('users', 0, -1)};
+my %USER_OF      = map { $_->{id} => $_ } @USERS;
+my %NAME_TO_USER = map { $_->{username} => $_ } @USERS;
+my %USERNAME_OF  = map { $_->{id} => $_->{username} } @USERS;
 
 filter 'session' => sub {
     my ($app) = @_;
@@ -85,7 +56,7 @@ filter 'get_user' => sub {
         my ($self, $c) = @_;
 
         my $user_id = $c->req->env->{"psgix.session"}->{user_id};
-        my $user = $self->user($user_id);
+        my $user = $user_id ? $USER_OF{$user_id} : undef;
 
         $c->stash->{user} = $user;
         $c->res->header('Cache-Control', 'private') if $user;
@@ -134,14 +105,14 @@ post '/signup' => [qw(session anti_csrf)] => sub {
 
     my $username = $c->req->param("username");
     my $password = $c->req->param("password");
-    my $user = $self->user_by_name($username);
+    my $user = $NAME_TO_USER{$username};
     if ($user) {
         $c->halt(400);
     }
     else {
         my $salt = substr( sha256_hex( time() . $username ), 0, 8 );
         my $password_hash = sha256_hex( $salt, $password );
-        $self->redis->rpush('users',+{
+        $redis->rpush('users',+{
             id => 9999, # TODO
             username => $username,
             password => $password_hash,
@@ -158,7 +129,7 @@ post '/signin' => [qw(session)] => sub {
 
     my $username = $c->req->param("username");
     my $password = $c->req->param("password");
-    my $user = $self->user_by_name($username);
+    my $user = $NAME_TO_USER{$username};
     if ( $user && $user->{password} eq sha256_hex($user->{salt} . $password) ) {
         $c->req->env->{"psgix.session.options"}->{change_id} = 1;
         my $session = $c->req->env->{"psgix.session"};
@@ -174,23 +145,23 @@ post '/signin' => [qw(session)] => sub {
 get '/' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', -100, -1);
+    my $total = $redis->llen('public_memos');
+    my $memos = $redis->lrange('public_memos', -100, -1);
     $memos = [ reverse map { decode_json($_) } @$memos ];
     my $res = $c->render('index.tx', {
         memos => $memos,
         page  => 0,
         total => $total,
     });
-    $self->memd->set('cache_/'.$c->stash->{session_id}, $c->res->body, 1);
+    $memd_async->set('cache_/'.$c->stash->{session_id}, $c->res->body, 1);
     return $res;
 };
 
 get '/recent/:page' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
     my $page  = int $c->args->{page};
-    my $total = $self->redis->llen('public_memos');
-    my $memos = $self->redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
+    my $total = $redis->llen('public_memos');
+    my $memos = $redis->lrange('public_memos', $page * 100, ($page+1) * 100 -1);
     $memos = [ map { decode_json($_) } @$memos ];
     if ( @$memos == 0 ) {
         return $c->halt(404);
@@ -200,14 +171,14 @@ get '/recent/:page' => [qw(session get_user)] => sub {
         page  => $page,
         total => $total,
     });
-    $self->memd->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 100);
+    $memd_async->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 100);
     return $res;
 };
 
 get '/mypage' => [qw(session get_user require_user)] => sub {
     my ($self, $c) = @_;
 
-    my $memos = $self->redis->lrange('user_memos_'.$c->stash->{user}->{id}, 0, -1);
+    my $memos = $redis->lrange('user_memos_'.$c->stash->{user}->{id}, 0, -1);
     $memos = [ map { decode_json($_) } @$memos ];
     $c->render('mypage.tx', { memos => $memos });
 };
@@ -217,7 +188,7 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
 
     my $is_private = scalar($c->req->param('is_private')) ? 1 : 0;
 
-    my $memo_id = $self->redis->incr('seq_memo');
+    my $memo_id = $redis->incr('seq_memo');
 
     my $content = scalar $c->req->param('content');
     my @lines = split(/\r?\n/, $content, 2);
@@ -230,16 +201,16 @@ post '/memo' => [qw(session get_user require_user anti_csrf)] => sub {
         is_private => $is_private,
         created_at => strftime("%Y-%m-%d %H:%M:%S",localtime),
     };
-    $memo->{username} = $self->username($memo->{user});
+    $memo->{username} = $USERNAME_OF{$memo->{user}};
     my $json_memo = encode_json($memo);
-    $self->redis->hset('memos', $memo_id, $json_memo);
+    $redis->hset('memos', $memo_id, $json_memo);
 
     $memo->{title} = $title;
     delete $memo->{content_html};
     $json_memo = encode_json($memo);
-    $self->redis->rpush('user_memos_'.$memo->{user}, $json_memo);
+    $redis->rpush('user_memos_'.$memo->{user}, $json_memo);
     if (!$is_private) {
-        $self->redis->rpush('public_memos', $json_memo);
+        $redis->rpush('public_memos', $json_memo);
     }
 
     $c->redirect('/memo/' . $memo_id);
@@ -249,7 +220,7 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     my ($self, $c) = @_;
 
     my $user = $c->stash->{user};
-    my $memo = $self->redis->hget('memos', $c->args->{id});
+    my $memo = $redis->hget('memos', $c->args->{id});
     unless ($memo) {
         $c->halt(404);
     }
@@ -261,7 +232,7 @@ get '/memo/:id' => [qw(session get_user)] => sub {
     }
 
     my ($newer, $older);
-    my $user_memos = $self->redis->lrange('user_memos_'.$memo->{user}, 0, -1);
+    my $user_memos = $redis->lrange('user_memos_'.$memo->{user}, 0, -1);
     $user_memos = [ map { decode_json($_) } @$user_memos ];
     unless ($user && $user->{id} == $memo->{user}) {
         $user_memos = [ grep { $_->{is_private} == 0 } @$user_memos ];
