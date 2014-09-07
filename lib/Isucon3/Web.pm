@@ -29,10 +29,15 @@ sub load_config {
     };
 }
 
+sub memd {
+    my ($self) = @_;
+    $self->{_memd} ||= Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock', noreply => 1 } ] });
+}
+
 sub redis {
     my ($self) = @_;
     $self->{_redis} ||= Redis->new(sock => '/tmp/redis.sock');
-}
+} 
 
 # proc cache
 my $USERS;
