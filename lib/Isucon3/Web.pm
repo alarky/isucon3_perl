@@ -29,8 +29,6 @@ sub load_config {
     };
 }
 
-my $memd       = Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock' } ] });
-my $memd_async = Cache::Memcached::Fast->new({ servers => [ +{ address => '/tmp/memcached.sock', noreply => 1 } ] });
 my $redis      = Redis->new(sock => '/tmp/redis.sock');
 
 # preload
@@ -153,7 +151,6 @@ get '/' => [qw(session get_user)] => sub {
         page  => 0,
         total => $total,
     });
-    $memd_async->set('cache_/'.$c->stash->{session_id}, $c->res->body, 1);
     return $res;
 };
 
@@ -171,7 +168,6 @@ get '/recent/:page' => [qw(session get_user)] => sub {
         page  => $page,
         total => $total,
     });
-    $memd_async->set('cache_/recent/'.$page.''.$c->stash->{session_id}, $c->res->body, 100);
     return $res;
 };
 
