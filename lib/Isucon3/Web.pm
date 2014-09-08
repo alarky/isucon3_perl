@@ -11,7 +11,6 @@ use File::Temp qw/ tempfile /;
 use IO::Handle;
 use Encode;
 use Time::Piece;
-use Cache::Memcached::Fast;
 use Text::Markdown::Discount qw/markdown/;
 use Time::HiRes qw/gettimeofday/;
 use Redis;

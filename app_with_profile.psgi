@@ -4,9 +4,8 @@ use lib "$FindBin::Bin/lib";
 use File::Basename;
 use Plack::Builder;
 use Isucon3::Web;
-use Plack::Session::Store::Cache;
+use Plack::Session::Store::Redis;
 use Plack::Session::State::Cookie;
-use Cache::Memcached::Fast;
 
 my @opts = qw(sigexit=int savesrc=0 start=no file=/home/isucon/webapp/public/nytprof/nytprof.out);
 $ENV{"NYTPROF"} = join ":", @opts;
@@ -21,10 +20,8 @@ builder {
 #        path => qr!^/(?:(?:css|js|img)/|favicon\.ico$)!,
 #        root => $root_dir . '/public';
     enable 'Session',
-        store => Plack::Session::Store::Cache->new(
-            cache => Cache::Memcached::Fast->new({
-                servers => [ +{ address => '/tmp/memcached.sock', noreply => 1 } ],
-            }),
+        store => Plack::Session::Store::Redis->new(
+            redis_factory => sub { Redis->new(sock => '/tmp/redis.sock') }
         ),
         state => Plack::Session::State::Cookie->new(
             httponly    => 1,
