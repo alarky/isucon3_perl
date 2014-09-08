@@ -71,6 +71,7 @@ sleep(2);
 print `sudo service supervisord start`;
 sleep(2);
 print `sudo service nginx restart`;
+print `sudo service varnish restart`;
 
 my $elapsed_time = time()-$start;
 print "initialize done ($elapsed_time sec)\n";
