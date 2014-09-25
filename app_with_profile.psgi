@@ -19,6 +19,9 @@ builder {
 #    enable 'Static',
 #        path => qr!^/(?:(?:css|js|img)/|favicon\.ico$)!,
 #        root => $root_dir . '/public';
+    enable 'Plack::Middleware::Profiler::KYTProf',
+		threshold => 10,
+	;
     enable 'Session',
         store => Plack::Session::Store::Redis->new(
             redis_factory => sub { Redis->new(sock => '/tmp/redis.sock') }
